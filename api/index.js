@@ -3,7 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const https = require("https");
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+// ── helpers ───────────────────────────────────────────────────────────────────
 
 function fetchImageBuffer(url) {
   return new Promise((resolve, reject) => {
@@ -35,28 +35,20 @@ function shuffle(arr) {
   return a;
 }
 
-// ── row colours ───────────────────────────────────────────────────────────────
-// bottom 20th percentile → shades of red; rest → alternating light-grey / white
+// Possible highlight colours for top-10% rows (anything but red)
+const TOP_COLORS = [
+  { bg0: "#d6eaff", bg1: "#bfd9ff", accent: "#2b7de9", text: "#0a2a5e", muted: "#2b5fa0" }, // blue
+  { bg0: "#d6f5e3", bg1: "#bfedce", accent: "#27a65a", text: "#0a3d20", muted: "#27864a" }, // green
+  { bg0: "#fff3cc", bg1: "#ffe9a0", accent: "#c49a00", text: "#3d2f00", muted: "#9a7700" }, // gold
+  { bg0: "#e8d6ff", bg1: "#d9bfff", accent: "#7c3aed", text: "#2e0a5e", muted: "#6d2fd4" }, // purple
+  { bg0: "#d6f5f5", bg1: "#bfeded", accent: "#0e9090", text: "#023030", muted: "#0c7a7a" }, // teal
+];
 
-function rowBg(percentile, rowIndex) {
-  if (percentile <= 20) {
-    // alternate two reds so adjacent rows are distinguishable
-    return rowIndex % 2 === 0 ? "#ffd6d6" : "#ffbdbd";
-  }
-  return rowIndex % 2 === 0 ? "#f5f5f5" : "#ffffff";
-}
-
-function rowAccent(percentile) {
-  // thin left-border accent colour
-  if (percentile <= 20) return "#e53e3e";
-  return "#cccccc";
-}
-
-// ── main handler ─────────────────────────────────────────────────────────────
+// ── main handler ──────────────────────────────────────────────────────────────
 
 module.exports = async function handler(req, res) {
   try {
-    // 1. Register Overpass font (must be in repo at /public/Overpass-VariableFont_wght.ttf)
+    // 1. Register Overpass font
     const fontPath = path.join(process.cwd(), "public", "Overpass-VariableFont_wght.ttf");
     if (fs.existsSync(fontPath)) {
       GlobalFonts.registerFromPath(fontPath, "Overpass");
@@ -80,7 +72,7 @@ module.exports = async function handler(req, res) {
       .filter(Boolean);
 
     // 3. Parse response rows
-    const responses = dataLines.map((line) => {
+    const allResponses = dataLines.map((line) => {
       const parts = line.split("\t");
       return {
         response: parts[0] ?? "",
@@ -89,15 +81,15 @@ module.exports = async function handler(req, res) {
       };
     });
 
-    // 4. Pick random count 10–20, sample responses + usernames
-    const count = randInt(10, Math.min(20, responses.length, usernames.length));
-    const sampledResponses = shuffle(responses).slice(0, count);
+    // 4. Pick random count 10–20, sample & sort by percentile desc
+    const count = randInt(10, Math.min(20, allResponses.length, usernames.length));
+    const sampledResponses = shuffle(allResponses).slice(0, count);
     const sampledUsernames = shuffle(usernames).slice(0, count);
 
     // 5. Assign random CDN image numbers (1–26593)
     const imageNums = Array.from({ length: count }, () => randInt(1, 26593));
 
-    // 6. Build rows: zip & sort by percentile descending (rank 1 = highest)
+    // 6. Build & sort rows
     let rows = sampledResponses.map((r, i) => ({
       rank: 0,
       username: sampledUsernames[i],
@@ -109,157 +101,143 @@ module.exports = async function handler(req, res) {
     rows.sort((a, b) => b.percentile - a.percentile);
     rows = rows.map((r, i) => ({ ...r, rank: i + 1 }));
 
-    // 7. Layout constants
-    const W = 900;
-    const ROW_H = 72;
-    const PADDING = 20;
-    const IMG_SIZE = 52;
-    const HEADER_H = 56;
-    const H = HEADER_H + ROW_H * count + PADDING;
+    // 7. Determine which rows are "bottom 20%" and "top 10%" of THIS selection
+    //    Bottom 20% = bottom floor(count * 0.2) rows (i.e. worst ranked)
+    //    Top 10%    = top floor(count * 0.1) rows (i.e. best ranked), 50/50 chance of highlight
+    const bottomCutoff = Math.max(1, Math.floor(count * 0.2));  // number of red rows
+    const topCutoff    = Math.max(1, Math.floor(count * 0.1));  // number of potential highlight rows
+    const doTopHighlight = Math.random() < 0.5; // 50/50
+
+    // Pick one consistent colour palette for the top highlight this render
+    const topPalette = TOP_COLORS[randInt(0, TOP_COLORS.length - 1)];
+
+    function rowStyle(rank, rowIndex) {
+      // rank 1 = best, rank `count` = worst
+      const isBottom = rank > count - bottomCutoff;
+      const isTop    = doTopHighlight && rank <= topCutoff;
+
+      if (isBottom) {
+        return {
+          bg:     rowIndex % 2 === 0 ? "#ffd6d6" : "#ffbdbd",
+          accent: "#e53e3e",
+          text:   "#7a1515",
+          muted:  "#b84040",
+        };
+      }
+      if (isTop) {
+        return {
+          bg:     rowIndex % 2 === 0 ? topPalette.bg0 : topPalette.bg1,
+          accent: topPalette.accent,
+          text:   topPalette.text,
+          muted:  topPalette.muted,
+        };
+      }
+      return {
+        bg:     rowIndex % 2 === 0 ? "#f5f5f5" : "#ffffff",
+        accent: "#dddddd",
+        text:   "#222233",
+        muted:  "#666688",
+      };
+    }
+
+    // 8. Layout constants
+    const W       = 1050;
+    const ROW_H   = 80;
+    const IMG_SIZE = 62;
+    const H       = ROW_H * count;
+
+    // Column positions
+    const COL_RANK   = 18;
+    const COL_IMG    = 58;
+    const COL_USER   = COL_IMG + IMG_SIZE + 14;       // ~134
+    const COL_RESP   = COL_USER + 180;                // ~314  — lots of room
+    const COL_PCT    = W - 210;                       // ~840
+    const COL_STDEV  = W - 80;                        // ~970
 
     const canvas = createCanvas(W, H);
-    const ctx = canvas.getContext("2d");
-
-    // ── background ────────────────────────────────────────────────────────────
-    ctx.fillStyle = "#1a1a2e";
-    ctx.fillRect(0, 0, W, H);
-
-    // ── header ────────────────────────────────────────────────────────────────
-    ctx.fillStyle = "#12122a";
-    ctx.fillRect(0, 0, W, HEADER_H);
-
-    const colX = {
-      rank: 18,
-      image: 70,
-      username: 140,
-      response: 370,
-      percentile: 590,
-      stdev: 760,
-    };
-
-    ctx.fillStyle = "#888aaa";
-    ctx.font = `600 13px ${FONT}`;
+    const ctx    = canvas.getContext("2d");
     ctx.textBaseline = "middle";
-    ctx.fillText("#", colX.rank, HEADER_H / 2);
-    ctx.fillText("USERNAME", colX.username, HEADER_H / 2);
-    ctx.fillText("RESPONSE", colX.response, HEADER_H / 2);
-    ctx.fillText("PERCENTILE", colX.percentile, HEADER_H / 2);
-    ctx.fillText("STDEV", colX.stdev, HEADER_H / 2);
 
-    // ── rows ──────────────────────────────────────────────────────────────────
+    // 9. Draw rows
     for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      const y = HEADER_H + i * ROW_H;
-      const isRed = row.percentile <= 20;
+      const row   = rows[i];
+      const y     = i * ROW_H;
+      const cy    = y + ROW_H / 2;
+      const style = rowStyle(row.rank, i);
 
-      // row background
-      ctx.fillStyle = rowBg(row.percentile, i);
+      // background
+      ctx.fillStyle = style.bg;
       ctx.fillRect(0, y, W, ROW_H);
 
       // left accent bar
-      ctx.fillStyle = rowAccent(row.percentile);
-      ctx.fillRect(0, y, 4, ROW_H);
+      ctx.fillStyle = style.accent;
+      ctx.fillRect(0, y, 5, ROW_H);
 
-      // subtle separator
-      ctx.fillStyle = "rgba(0,0,0,0.07)";
+      // separator
+      ctx.fillStyle = "rgba(0,0,0,0.06)";
       ctx.fillRect(0, y + ROW_H - 1, W, 1);
 
-      const cy = y + ROW_H / 2;
-      const textColor = isRed ? "#7a1515" : "#222233";
-      const mutedColor = isRed ? "#b84040" : "#666688";
-
-      // rank
-      ctx.font = `700 15px ${FONT}`;
-      ctx.fillStyle = mutedColor;
+      // rank number
+      ctx.font = `700 17px ${FONT}`;
+      ctx.fillStyle = style.muted;
       ctx.textAlign = "right";
-      ctx.fillText(`${row.rank}`, colX.image - 6, cy);
+      ctx.fillText(`${row.rank}`, COL_IMG - 6, cy);
 
-      // avatar image
-      const imgX = colX.image;
+      // avatar — square
+      const imgX = COL_IMG;
       const imgY = cy - IMG_SIZE / 2;
       const imgUrl = `https://cdn.booksona.lol/${row.imageNum}.png`;
 
       try {
         const buf = await fetchImageBuffer(imgUrl);
         const img = await loadImage(buf);
-
-        // circular clip
-        ctx.save();
-        ctx.beginPath();
-        ctx.arc(imgX + IMG_SIZE / 2, imgY + IMG_SIZE / 2, IMG_SIZE / 2, 0, Math.PI * 2);
-        ctx.closePath();
-        ctx.clip();
         ctx.drawImage(img, imgX, imgY, IMG_SIZE, IMG_SIZE);
-        ctx.restore();
-
-        // circle border
-        ctx.beginPath();
-        ctx.arc(imgX + IMG_SIZE / 2, imgY + IMG_SIZE / 2, IMG_SIZE / 2, 0, Math.PI * 2);
-        ctx.strokeStyle = isRed ? "#e5737380" : "#cccccc80";
-        ctx.lineWidth = 2;
-        ctx.stroke();
       } catch {
-        // fallback placeholder circle if image fails
-        ctx.save();
-        ctx.beginPath();
-        ctx.arc(imgX + IMG_SIZE / 2, imgY + IMG_SIZE / 2, IMG_SIZE / 2, 0, Math.PI * 2);
-        ctx.fillStyle = isRed ? "#ffb3b3" : "#e0e0f0";
-        ctx.fill();
-        ctx.restore();
-        ctx.font = `700 11px ${FONT}`;
-        ctx.fillStyle = mutedColor;
+        ctx.fillStyle = style.muted;
+        ctx.fillRect(imgX, imgY, IMG_SIZE, IMG_SIZE);
+        ctx.font = `700 13px ${FONT}`;
+        ctx.fillStyle = "#ffffff";
         ctx.textAlign = "center";
-        ctx.fillText("?", imgX + IMG_SIZE / 2, imgY + IMG_SIZE / 2 + 1);
+        ctx.fillText("?", imgX + IMG_SIZE / 2, imgY + IMG_SIZE / 2);
       }
 
       ctx.textAlign = "left";
 
       // username
-      ctx.font = `700 15px ${FONT}`;
-      ctx.fillStyle = textColor;
-      ctx.fillText(row.username, colX.username, cy - 1);
+      ctx.font = `700 17px ${FONT}`;
+      ctx.fillStyle = style.text;
+      ctx.fillText(row.username, COL_USER, cy);
 
-      // response
-      ctx.font = `500 14px ${FONT}`;
-      ctx.fillStyle = textColor;
-      // truncate long responses
+      // response — generous space, truncate only if truly needed
+      const maxRespW = COL_PCT - COL_RESP - 20;
+      ctx.font = `400 17px ${FONT}`;
+      ctx.fillStyle = style.text;
       let respText = String(row.response);
-      ctx.font = `500 14px ${FONT}`;
-      while (respText.length > 1 && ctx.measureText(respText).width > colX.percentile - colX.response - 16) {
+      while (respText.length > 1 && ctx.measureText(respText).width > maxRespW) {
         respText = respText.slice(0, -1);
       }
       if (respText !== String(row.response)) respText += "…";
-      ctx.fillText(respText, colX.response, cy);
+      ctx.fillText(respText, COL_RESP, cy);
 
-      // percentile — badge style
-      const pct = row.percentile.toFixed(1);
-      const badgeW = 64;
-      const badgeH = 26;
-      const badgeX = colX.percentile;
-      const badgeY = cy - badgeH / 2;
-      const badgeFill = isRed ? "#e53e3e" : "#4a90d9";
-      ctx.fillStyle = badgeFill;
-      ctx.beginPath();
-      ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 6);
-      ctx.fill();
-      ctx.font = `700 13px ${FONT}`;
-      ctx.fillStyle = "#ffffff";
-      ctx.textAlign = "center";
-      ctx.fillText(`${pct}%`, badgeX + badgeW / 2, cy + 1);
+      // percentile — plain text, right-aligned in its column
+      ctx.font = `600 17px ${FONT}`;
+      ctx.fillStyle = style.text;
+      ctx.textAlign = "right";
+      ctx.fillText(`${row.percentile.toFixed(1)}%`, COL_STDEV - 16, cy);
+
+      // stdev — no ± prefix, just the number
+      ctx.font = `400 16px ${FONT}`;
+      ctx.fillStyle = style.muted;
       ctx.textAlign = "left";
-
-      // stdev
-      ctx.font = `400 13px ${FONT}`;
-      ctx.fillStyle = mutedColor;
-      ctx.fillText(`±${row.stdev}`, colX.stdev, cy);
+      ctx.fillText(String(row.stdev), COL_STDEV, cy);
     }
 
-    // ── encode & send ─────────────────────────────────────────────────────────
+    // 10. Encode & send
     const png = await canvas.encode("png");
-
     res.setHeader("Content-Type", "image/png");
     res.setHeader("Cache-Control", "no-store");
     res.end(png);
+
   } catch (err) {
     console.error(err);
     res.statusCode = 500;
